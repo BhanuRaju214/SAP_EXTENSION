@@ -1,0 +1,18 @@
+{
+  "id": "com.mycompany.priceChecker",
+  "type": "extension",
+  "version": "1.0.0",
+  "name": "Price Checker",
+  "description": "Quick item price lookup for SAP Business One",
+  "vendor": "My Company",
+  "license": "proprietary",
+  "extensionPoints": [
+    {
+      "id": "priceCheckerMain",
+      "type": "standalone",
+      "title": "Price Checker",
+      "url": "index.html",
+      "icon": "sap-icon://price-tag"
+    }
+  ]
+}

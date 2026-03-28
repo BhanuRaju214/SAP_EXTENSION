@@ -1,0 +1,7 @@
+node_modules/
+.env
+dist/
+*.ard
+*.zip
+supabase/.temp/
+.netlify/
