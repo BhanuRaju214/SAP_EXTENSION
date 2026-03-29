@@ -1,6 +1,8 @@
 import { useState, useEffect, useCallback } from 'react'
-import { supabaseUrl, supabaseAnonKey } from './lib/supabase'
-import { getOrCreateSession, loginWithCredentials, buildSAPHeaders, fetchSupabaseSchema } from './lib/sapAuth'
+import {
+  getOrCreateSession, loginDirect, loginViaSupabase,
+  searchItems, isInsideSAPWebClient, SUPABASE_INFO
+} from './lib/sapAuth'
 import LoginForm from './components/LoginForm'
 import SearchBar from './components/SearchBar'
 import PriceCard from './components/PriceCard'
@@ -8,90 +10,64 @@ import PriceCard from './components/PriceCard'
 const EXPIRED_MSG = 'Your session expired. Please log in again.'
 
 export default function App() {
-  // ── Dual session state ──────────────────────────────────────────────────
   const [session,        setSession]        = useState(null)
-  // session shape: { mode: 'sso'|'standalone', sapSession: { sessionToken, companyDB }, username }
   const [sessionLoading, setSessionLoading] = useState(true)
   const [loginLoading,   setLoginLoading]   = useState(false)
   const [loginError,     setLoginError]     = useState(null)
-
-  // ── Supabase schema info ────────────────────────────────────────────────
-  const [schemaInfo, setSchemaInfo] = useState(null)
-  // shape: { database, schema, tables: [{name, rowCount, columns}], lastSync }
-
-  // ── Search state ────────────────────────────────────────────────────────
   const [searchResults,  setSearchResults]  = useState([])
   const [selectedItem,   setSelectedItem]   = useState(null)
   const [searchLoading,  setSearchLoading]  = useState(false)
   const [searchError,    setSearchError]    = useState(null)
+  const [isOffline,      setIsOffline]      = useState(!navigator.onLine)
 
-  const [isOffline, setIsOffline] = useState(!navigator.onLine)
+  const inWebClient = isInsideSAPWebClient()
 
   useEffect(() => {
-    const on  = () => setIsOffline(false)
-    const off = () => setIsOffline(true)
-    window.addEventListener('online',  on)
-    window.addEventListener('offline', off)
+    const on = () => setIsOffline(false), off = () => setIsOffline(true)
+    window.addEventListener('online', on); window.addEventListener('offline', off)
     return () => { window.removeEventListener('online', on); window.removeEventListener('offline', off) }
   }, [])
 
-  // ── SSO detection on mount ──────────────────────────────────────────────
+  // SSO detection
   useEffect(() => {
     getOrCreateSession()
-      .then(sso => { if (sso) setSession(sso) })
+      .then(s => { if (s?.sapSession) setSession(s) }) // only set if we got a real session
       .catch(console.error)
       .finally(() => setSessionLoading(false))
   }, [])
 
-  // ── Fetch Supabase schema when session is established ───────────────────
-  useEffect(() => {
-    if (!session) return
-    fetchSupabaseSchema().then(setSchemaInfo).catch(console.error)
-  }, [session])
-
-  // ── Session expiry ──────────────────────────────────────────────────────
   const expire = useCallback(() => {
     setSession(null); setSearchResults([]); setSelectedItem(null)
-    setSearchError(null); setSchemaInfo(null); setLoginError(EXPIRED_MSG)
+    setSearchError(null); setLoginError(EXPIRED_MSG)
   }, [])
 
-  // ── Login (Mode B) ─────────────────────────────────────────────────────
+  // Login — uses direct SAP API inside Web Client, Supabase otherwise
   async function handleLogin(creds) {
     setLoginLoading(true); setLoginError(null)
-    try { setSession(await loginWithCredentials(creds)) }
-    catch (e) {
+    try {
+      const loginFn = inWebClient ? loginDirect : loginViaSupabase
+      setSession(await loginFn(creds.username, creds.password, creds.companyDB))
+    } catch (e) {
       setLoginError(e.message === 'invalid_credentials'
         ? 'Invalid SAP credentials. Please try again.'
         : e.message || 'Login failed.')
     } finally { setLoginLoading(false) }
   }
 
-  // ── Search via Supabase Edge Function ──────────────────────────────────
+  // Search — auto-routes to direct or Supabase based on session.useDirectAPI
   const handleSearch = useCallback(async (query) => {
     if (!query) { setSearchResults([]); setSearchError(null); return }
     if (!session) return
     setSearchLoading(true); setSearchError(null)
     try {
-      const res = await fetch(
-        `${supabaseUrl}/functions/v1/get-item-price?search=${encodeURIComponent(query)}`,
-        { headers: { Authorization: `Bearer ${supabaseAnonKey}`, ...buildSAPHeaders(session) } }
-      )
-      if (res.status === 401) { expire(); return }
-      if (!res.ok) {
-        const e = await res.json().catch(() => ({}))
-        throw new Error(e.message || `Error ${res.status}`)
-      }
-      const data = await res.json()
-      if (data?.error === 'offline') { setSearchError('You are offline — showing cached data'); return }
-      setSearchResults(Array.isArray(data) ? data : data ? [data] : [])
+      setSearchResults(await searchItems(query, session))
     } catch (e) {
+      if (e.message === 'session_expired') { expire(); return }
       setSearchError(navigator.onLine ? (e.message || 'Search failed.') : 'You are offline.')
     } finally { setSearchLoading(false) }
   }, [session, expire])
 
-  function handleSelect(item) { setSelectedItem(item) }
-
-  // ── Loading splash ─────────────────────────────────────────────────────
+  // ── Loading ────────────────────────────────────────────────────────────
   if (sessionLoading) return (
     <div className="min-h-screen bg-sap-bg flex items-center justify-center">
       <div className="text-center">
@@ -99,22 +75,27 @@ export default function App() {
           <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/>
           <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/>
         </svg>
-        <p className="text-sap-text-2 text-sm">Connecting sessions…</p>
+        <p className="text-sap-text-2 text-sm">Connecting…</p>
       </div>
     </div>
   )
 
   // ── Login form ─────────────────────────────────────────────────────────
-  if (!session) return <LoginForm onLogin={handleLogin} isLoading={loginLoading} error={loginError}/>
-
-  // ── Price cache stats ──────────────────────────────────────────────────
-  const cacheTable = schemaInfo?.tables?.find(t => t.name === 'price_cache')
+  if (!session) return (
+    <LoginForm
+      onLogin={handleLogin}
+      isLoading={loginLoading}
+      error={loginError}
+      apiMode={inWebClient ? 'Direct SAP (same-origin)' : 'Supabase Edge Functions'}
+      supabaseInfo={SUPABASE_INFO}
+    />
+  )
 
   // ── Main app ───────────────────────────────────────────────────────────
   return (
     <div className="min-h-screen bg-sap-bg flex flex-col font-sans">
 
-      {/* ── SAP Shell Bar ── */}
+      {/* Shell bar */}
       <header className="bg-sap-shell flex-shrink-0 z-20 shadow-sap-md">
         <div className="h-12 px-4 flex items-center gap-3">
           <svg viewBox="0 0 40 18" className="h-5 flex-shrink-0">
@@ -123,9 +104,7 @@ export default function App() {
               fill="#0070F2" fontSize="9" fontWeight="700" fontFamily="Arial,sans-serif" letterSpacing="0.5">SAP</text>
           </svg>
           <div className="w-px h-5 bg-blue-400 opacity-40"/>
-          <span className="text-white font-semibold text-sm tracking-wide flex-1 truncate">
-            Price Checker
-          </span>
+          <span className="text-white font-semibold text-sm flex-1 truncate">Price Checker</span>
 
           <div className="flex items-center gap-2 flex-shrink-0">
             {isOffline && (
@@ -133,11 +112,15 @@ export default function App() {
                 <span className="w-1.5 h-1.5 rounded-full bg-red-400"/> Offline
               </span>
             )}
+            {/* API Mode badge */}
             <span className={`inline-flex items-center gap-1 px-2.5 py-0.5 rounded text-xs font-semibold
-              ${session.mode==='sso' ? 'bg-blue-700 text-blue-100' : 'bg-blue-800 text-blue-200'}`}>
-              <span className={`w-1.5 h-1.5 rounded-full
-                ${session.mode==='sso' ? 'bg-green-400' : 'bg-blue-300'}`}/>
-              {session.mode==='sso' ? 'SAP Webclient' : 'Standalone'}
+              ${session.useDirectAPI ? 'bg-green-800 text-green-100' : 'bg-purple-800 text-purple-100'}`}>
+              <span className={`w-1.5 h-1.5 rounded-full ${session.useDirectAPI ? 'bg-green-400' : 'bg-purple-400'}`}/>
+              {session.useDirectAPI ? 'Direct SAP API' : 'via Supabase'}
+            </span>
+            <span className={`inline-flex items-center gap-1 px-2.5 py-0.5 rounded text-xs font-semibold
+              ${session.mode === 'webclient' ? 'bg-blue-700 text-blue-100' : 'bg-blue-800 text-blue-200'}`}>
+              {session.mode === 'webclient' ? 'Web Client' : 'Standalone'}
             </span>
             <button onClick={expire} type="button" title="Sign out"
               className="p-1.5 rounded text-blue-200 hover:text-white hover:bg-blue-700 transition-colors">
@@ -149,45 +132,38 @@ export default function App() {
           </div>
         </div>
 
-        {/* Sub-header with dual session info */}
-        <div className="h-auto px-4 py-2 bg-white border-b border-sap-border flex flex-wrap items-center gap-x-4 gap-y-1">
-
+        {/* Session info bar */}
+        <div className="px-4 py-2 bg-white border-b border-sap-border flex flex-wrap items-center gap-x-4 gap-y-1">
           {/* SAP Session */}
           <div className="flex items-center gap-1.5">
             <span className="w-2 h-2 rounded-full bg-green-500"/>
-            <span className="text-xs text-sap-text-2">SAP Session:</span>
-            <span className="text-xs font-mono font-medium text-sap-text-1">
-              {session.sapSession.sessionToken.substring(0, 12)}…
+            <span className="text-xs text-sap-text-2">SAP:</span>
+            <span className="text-xs font-mono font-semibold text-sap-text-1">{session.sapSession.companyDB}</span>
+            <span className="text-xs text-sap-text-2 hidden sm:inline">
+              ({session.sapSession.sessionToken.substring(0, 8)}…)
             </span>
           </div>
-
           <span className="text-sap-border">|</span>
-
-          {/* SAP Company */}
-          <div className="flex items-center gap-1.5">
-            <svg className="w-3.5 h-3.5 text-sap-blue" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
-                d="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5"/>
-            </svg>
-            <span className="text-xs text-sap-text-2">SAP DB:</span>
-            <span className="text-xs font-mono font-semibold text-sap-text-1">{session.sapSession.companyDB}</span>
-          </div>
-
-          <span className="text-sap-border">|</span>
-
-          {/* Supabase Database */}
+          {/* Supabase info */}
           <div className="flex items-center gap-1.5">
             <span className="w-2 h-2 rounded-full bg-emerald-500"/>
             <span className="text-xs text-sap-text-2">Supabase:</span>
-            <span className="text-xs font-mono font-medium text-sap-text-1">
-              {schemaInfo?.database ?? 'stketabfgrcblcrcjauc'}
-            </span>
-            <span className="text-xs text-sap-text-2">/ {schemaInfo?.schema ?? 'public'}</span>
+            <span className="text-xs font-mono font-semibold text-sap-text-1">{SUPABASE_INFO.projectRef}</span>
+            <span className="text-xs text-sap-text-2">/ {SUPABASE_INFO.schema}</span>
+          </div>
+          <span className="text-sap-border">|</span>
+          {/* User */}
+          <div className="flex items-center gap-1.5">
+            <svg className="w-3.5 h-3.5 text-sap-text-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z"/>
+            </svg>
+            <span className="text-xs font-medium text-sap-text-1">{session.username || 'SSO'}</span>
           </div>
         </div>
       </header>
 
-      {/* ── Page content ── */}
+      {/* Page content */}
       <main className="flex-1 max-w-2xl w-full mx-auto px-4 py-5 space-y-4">
 
         {isOffline && (
@@ -200,74 +176,71 @@ export default function App() {
           </div>
         )}
 
-        {/* ── Supabase Schema / Sessions Panel ── */}
+        {/* Connection Info Panel */}
         <div className="bg-white rounded-lg border border-sap-border shadow-sap-sm">
-          <div className="px-4 py-2.5 bg-sap-bg border-b border-sap-border rounded-t-lg flex items-center justify-between">
+          <div className="px-4 py-2 bg-sap-bg border-b border-sap-border rounded-t-lg">
             <span className="text-xs font-semibold text-sap-text-2 uppercase tracking-wide">
-              Session & Database Info
-            </span>
-            <span className="text-xs text-sap-text-2">
-              {schemaInfo?.lastSync
-                ? `Synced: ${new Date(schemaInfo.lastSync).toLocaleTimeString()}`
-                : 'Loading…'
-              }
+              Connection Details
             </span>
           </div>
-          <div className="p-4 grid grid-cols-1 sm:grid-cols-3 gap-3">
+          <div className="p-4 grid grid-cols-1 sm:grid-cols-2 gap-3">
 
-            {/* SAP Session Tile */}
+            {/* SAP Connection */}
             <div className="bg-sap-blue-lt rounded-lg p-3 border border-blue-100">
               <div className="flex items-center gap-1.5 mb-2">
-                <span className="w-2 h-2 rounded-full bg-green-500"/>
-                <span className="text-xs font-semibold text-sap-blue uppercase">SAP B1 Session</span>
+                <span className="w-2 h-2 rounded-full bg-green-500 animate-pulse"/>
+                <span className="text-xs font-semibold text-sap-blue uppercase">SAP B1 Service Layer</span>
               </div>
-              <p className="text-xs text-sap-text-2">Company</p>
-              <p className="text-sm font-mono font-bold text-sap-text-1">{session.sapSession.companyDB}</p>
-              <p className="text-xs text-sap-text-2 mt-1">User</p>
-              <p className="text-sm font-medium text-sap-text-1">{session.username || 'SSO user'}</p>
+              <div className="space-y-1">
+                <div className="flex justify-between">
+                  <span className="text-xs text-sap-text-2">Company DB</span>
+                  <span className="text-xs font-mono font-bold text-sap-text-1">{session.sapSession.companyDB}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-xs text-sap-text-2">API Version</span>
+                  <span className="text-xs font-mono text-sap-text-1">v2</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-xs text-sap-text-2">Connection</span>
+                  <span className="text-xs font-semibold text-green-700">
+                    {session.useDirectAPI ? 'Direct (same-origin)' : 'Via Supabase proxy'}
+                  </span>
+                </div>
+              </div>
             </div>
 
-            {/* Supabase Session Tile */}
+            {/* Supabase Connection */}
             <div className="bg-emerald-50 rounded-lg p-3 border border-emerald-100">
               <div className="flex items-center gap-1.5 mb-2">
                 <span className="w-2 h-2 rounded-full bg-emerald-500"/>
-                <span className="text-xs font-semibold text-emerald-700 uppercase">Supabase DB</span>
+                <span className="text-xs font-semibold text-emerald-700 uppercase">Supabase Database</span>
               </div>
-              <p className="text-xs text-sap-text-2">Project</p>
-              <p className="text-sm font-mono font-bold text-sap-text-1">
-                {schemaInfo?.database ?? 'stketabfgrcblcrcjauc'}
-              </p>
-              <p className="text-xs text-sap-text-2 mt-1">Schema</p>
-              <p className="text-sm font-medium text-sap-text-1">{schemaInfo?.schema ?? 'public'}</p>
-            </div>
-
-            {/* Price Cache Tile */}
-            <div className="bg-gray-50 rounded-lg p-3 border border-sap-border">
-              <div className="flex items-center gap-1.5 mb-2">
-                <svg className="w-3.5 h-3.5 text-sap-text-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
-                    d="M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582-4 8-4s8 1.79 8 4"/>
-                </svg>
-                <span className="text-xs font-semibold text-sap-text-2 uppercase">Cache Table</span>
+              <div className="space-y-1">
+                <div className="flex justify-between">
+                  <span className="text-xs text-sap-text-2">Project</span>
+                  <span className="text-xs font-mono font-bold text-sap-text-1">{SUPABASE_INFO.projectRef}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-xs text-sap-text-2">Schema</span>
+                  <span className="text-xs font-mono text-sap-text-1">{SUPABASE_INFO.schema}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-xs text-sap-text-2">Cache Table</span>
+                  <span className="text-xs font-mono text-sap-text-1">price_cache</span>
+                </div>
               </div>
-              <p className="text-xs text-sap-text-2">Table</p>
-              <p className="text-sm font-mono font-bold text-sap-text-1">price_cache</p>
-              <p className="text-xs text-sap-text-2 mt-1">Columns</p>
-              <p className="text-sm font-medium text-sap-text-1">
-                {cacheTable?.columns?.length ?? 9} fields
-              </p>
             </div>
           </div>
         </div>
 
-        {/* ── Search Panel ── */}
+        {/* Search */}
         <div className="bg-white rounded-lg border border-sap-border shadow-sap-sm p-4">
           <label className="block text-xs font-semibold text-sap-text-2 uppercase tracking-wide mb-2">
             Search Items
           </label>
           <SearchBar
             onSearch={handleSearch}
-            onSelect={handleSelect}
+            onSelect={setSelectedItem}
             results={searchResults}
             isSearching={searchLoading}
           />
@@ -282,15 +255,13 @@ export default function App() {
           )}
         </div>
 
-        {/* ── Price Card ── */}
+        {/* Price card */}
         {selectedItem ? (
           <div>
             <div className="flex items-center justify-between mb-2">
               <span className="text-xs font-semibold text-sap-text-2 uppercase tracking-wide">Item Details</span>
               <button onClick={() => setSelectedItem(null)} type="button"
-                className="text-xs text-sap-blue hover:underline font-medium">
-                ← Back to search
-              </button>
+                className="text-xs text-sap-blue hover:underline font-medium">← Back</button>
             </div>
             <PriceCard item={selectedItem}/>
           </div>
@@ -303,21 +274,18 @@ export default function App() {
               </svg>
             </div>
             <p className="text-sm font-semibold text-sap-text-2">No item selected</p>
-            <p className="text-xs text-sap-text-2 mt-1 max-w-xs mx-auto">
-              Type a code like <span className="font-mono text-sap-blue">A00001</span> or part of an item name
-            </p>
+            <p className="text-xs text-sap-text-2 mt-1">Type a code like <span className="font-mono text-sap-blue">A00001</span> or item name above</p>
           </div>
         )}
       </main>
 
-      {/* ── Footer ── */}
       <footer className="bg-white border-t border-sap-border py-2 px-4 text-center flex-shrink-0">
         <p className="text-xs text-sap-text-2">
-          SAP B1 <span className="font-mono">{session.sapSession.companyDB}</span>
+          SAP <span className="font-mono">{session.sapSession.companyDB}</span>
+          {' · Supabase '}
+          <span className="font-mono">{SUPABASE_INFO.projectRef}</span>
           {' · '}
-          Supabase <span className="font-mono">{schemaInfo?.database ?? 'stketabfgrcblcrcjauc'}</span>
-          {' · '}
-          Price Checker v1.0.0
+          {session.useDirectAPI ? 'Direct API' : 'Edge Functions'}
         </p>
       </footer>
     </div>
