@@ -28,10 +28,11 @@ export default function App() {
     return () => { window.removeEventListener('online', on); window.removeEventListener('offline', off) }
   }, [])
 
-  // SSO detection
+  // Auto-session: inside Web Client → always gets a session (no login needed)
+  // Standalone → returns null → shows login form
   useEffect(() => {
     getOrCreateSession()
-      .then(s => { if (s?.sapSession) setSession(s) }) // only set if we got a real session
+      .then(s => { if (s) setSession(s) })
       .catch(console.error)
       .finally(() => setSessionLoading(false))
   }, [])
