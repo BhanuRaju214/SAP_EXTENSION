@@ -1,0 +1,10 @@
+_schema-version: "3.2"
+ID: com-mycompany-pricechecker
+version: 1.0.0
+provider: MyCompany
+modules:
+- name: price-checker
+  type: single-page-app
+  path: build
+parameters:
+  deploy_mode: b1-webclient

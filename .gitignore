@@ -5,3 +5,7 @@ dist/
 *.zip
 supabase/.temp/
 .netlify/
+build/
+mta_archives/
+Makefile_*.mta
+.sap-price-checker_mta_build_tmp/

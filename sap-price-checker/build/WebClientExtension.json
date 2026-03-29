@@ -1,0 +1,19 @@
+{
+  "tiles": [
+    {
+      "text": "Price Checker",
+      "icon": "sap-icon://tag",
+      "url": "index.html",
+      "subtitle": "Quick Item Price Lookup",
+      "size": "1x1",
+      "dynamicContent": {
+        "repositories": [
+          {
+            "converter": "kpiNumber",
+            "endpoint": "/b1s/v2/Items/$count"
+          }
+        ]
+      }
+    }
+  ]
+}
