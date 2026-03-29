@@ -3,6 +3,14 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta http-equiv="Content-Security-Policy"
+      content="default-src 'self' 'unsafe-inline' 'unsafe-eval' data: blob:;
+               connect-src 'self' https://*.supabase.co https://stketabfgrcblcrcjauc.supabase.co;
+               script-src 'self' 'unsafe-inline' 'unsafe-eval';
+               style-src 'self' 'unsafe-inline';
+               img-src 'self' data: blob: https:;
+               font-src 'self' data: https:;
+               worker-src 'self' blob:;" />
     <meta name="theme-color" content="#0070F2" />
     <meta name="description" content="Quick item price checker for SAP Business One" />
     <link rel="manifest" href="./pwa.manifest.json" />

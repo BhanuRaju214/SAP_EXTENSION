@@ -24,6 +24,23 @@ export function isInsideSAPWebClient() {
   return false
 }
 
+/**
+ * Test if Supabase is reachable (CSP may block it inside Web Client).
+ * If the meta CSP tag works, this will succeed.
+ */
+async function canReachSupabase() {
+  try {
+    const res = await fetch(`${supabaseUrl}/functions/v1/`, {
+      method: 'HEAD',
+      headers: { Authorization: `Bearer ${supabaseAnonKey}` },
+      signal: AbortSignal.timeout(3000),
+    })
+    return true // any response (even 404) means Supabase is reachable
+  } catch {
+    return false // CSP blocked or network error
+  }
+}
+
 // ── Currency normalizer ───────────────────────────────────────────────────
 const CURRENCY_MAP = { '$':'USD','€':'EUR','£':'GBP','¥':'JPY','₹':'INR' }
 function normCurrency(raw) {
@@ -52,9 +69,16 @@ export async function getOrCreateSession() {
     } catch { /* ignore */ }
   }
 
-  // If inside webclient but no SSO context, still use direct API
+  // If inside webclient but no SSO context, check if Supabase is reachable
+  // (the meta CSP tag in index.html should whitelist *.supabase.co)
   if (insideWebClient) {
-    return { mode: 'webclient', sapSession: null, username: null, useDirectAPI: true }
+    const supabaseOk = await canReachSupabase()
+    return {
+      mode: 'webclient',
+      sapSession: null,
+      username: null,
+      useDirectAPI: !supabaseOk,  // prefer Supabase if reachable, else fall back to direct
+    }
   }
 
   return null // Show login form (standalone mode)

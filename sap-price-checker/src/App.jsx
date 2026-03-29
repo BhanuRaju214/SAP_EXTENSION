@@ -41,12 +41,26 @@ export default function App() {
     setSearchError(null); setLoginError(EXPIRED_MSG)
   }, [])
 
-  // Login — uses direct SAP API inside Web Client, Supabase otherwise
+  // Login — try Supabase first (works if CSP meta tag is in place),
+  // fall back to direct SAP API if CSP blocks Supabase
   async function handleLogin(creds) {
     setLoginLoading(true); setLoginError(null)
     try {
-      const loginFn = inWebClient ? loginDirect : loginViaSupabase
-      setSession(await loginFn(creds.username, creds.password, creds.companyDB))
+      let result
+      try {
+        // Try Supabase Edge Function first (works everywhere if CSP allows it)
+        result = await loginViaSupabase(creds.username, creds.password, creds.companyDB)
+      } catch (supaErr) {
+        if (supaErr.message === 'invalid_credentials') throw supaErr
+        if (inWebClient) {
+          // Supabase blocked by CSP → fall back to direct SAP API
+          console.warn('Supabase unreachable, falling back to direct SAP API:', supaErr.message)
+          result = await loginDirect(creds.username, creds.password, creds.companyDB)
+        } else {
+          throw supaErr
+        }
+      }
+      setSession(result)
     } catch (e) {
       setLoginError(e.message === 'invalid_credentials'
         ? 'Invalid SAP credentials. Please try again.'
