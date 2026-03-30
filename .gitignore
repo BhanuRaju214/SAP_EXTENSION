@@ -3,7 +3,7 @@ node_modules/
 dist/
 *.ard
 *.zip
-supabase/.temp/
+**/supabase/.temp/
 .netlify/
 build/
 mta_archives/
